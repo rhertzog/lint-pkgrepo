@@ -32,20 +32,45 @@ my $global_bin_index = Dpkg::Index->new(type => CTRL_INDEX_PKG);
 
 # Load all the indexes
 foreach my $repo (keys %$REPOS) {
-    my $base_uri = $REPOS->{$repo}{base_uri};
-    if ($REPOS->{$repo}{'source'}) {
-	my $index = parse_index_from_uri("$base_uri/source/Sources.gz",
-					 CTRL_INDEX_SRC);
-	$idx->{"$repo/src"} = $index;
-	$global_src_index->merge($index);
-    }
+    my $base_uri = get_repo_info('base_uri', $repo);
+    my $components = get_repo_info('components', $repo);
     my @archs;
-    push @archs, @{$REPOS->{$repo}{'archs'}} if exists $REPOS->{$repo}{'archs'};
+    push @archs, @{get_repo_info('archs', $repo, [])};
+    if (not defined $components) {
+	if (get_repo_info('source', $repo)) {
+	    my $index = parse_index_from_uri("$base_uri/source/Sources.gz",
+					     CTRL_INDEX_SRC);
+	    $idx->{"$repo/src"} = $index;
+	    $global_src_index->merge($index);
+	}
+	foreach my $arch (@archs) {
+	    my $index = parse_index_from_uri("$base_uri/binary-$arch/Packages.gz",
+					     CTRL_INDEX_PKG);
+	    $idx->{"$repo/$arch"} = $index;
+	    $global_bin_index->merge($index);
+	}
+	next;
+    }
+    $idx->{"$repo/src"} = Dpkg::Index->new(type => CTRL_INDEX_SRC);
     foreach my $arch (@archs) {
-	my $index = parse_index_from_uri("$base_uri/binary-$arch/Packages.gz",
-					 CTRL_INDEX_PKG);
-	$idx->{"$repo/$arch"} = $index;
-	$global_bin_index->merge($index);
+	$idx->{"$repo/$arch"} = Dpkg::Index->new(type => CTRL_INDEX_PKG);
+    }
+    foreach my $component (keys %$components) {
+
+	if (get_component_info('source', $repo, $component)) {
+	    my $index = parse_index_from_uri(
+		"$base_uri/$component/source/Sources.gz", CTRL_INDEX_SRC);
+	    $idx->{"$repo/$component/src"} = $index;
+	    $idx->{"$repo/src"}->merge($index);
+	    $global_src_index->merge($index);
+	}
+	foreach my $arch (@archs) {
+	    my $index = parse_index_from_uri(
+		"$base_uri/$component/binary-$arch/Packages.gz", CTRL_INDEX_PKG);
+	    $idx->{"$repo/$component/$arch"} = $index;
+	    $idx->{"$repo/$arch"}->merge($index);
+	    $global_bin_index->merge($index);
+	}
     }
 }
 
@@ -125,6 +150,35 @@ foreach my $pkg ($global_src_index->get_keys()) {
 }
 print "</table>\n</body>\n</html>";
 
+sub get_repo_info {
+    my ($field, $repo, $default_value) = @_;
+    return get_component_info($field, $repo, undef, $default_value);
+}
+
+sub get_component_info {
+    my ($field, $repo, $component, $default_value) = @_;
+    if (defined $component and
+	exists $REPOS->{$repo}{components} and
+	exists $REPOS->{$repo}{components}{$component} and
+	exists $REPOS->{$repo}{components}{$component}{$field})
+    {
+	return $REPOS->{$repo}{components}{$component}{$field};
+    } elsif (exists $REPOS->{$repo}{$field}) {
+	return $REPOS->{$repo}{$field};
+    } else {
+	return $default_value;
+    }
+}
+
+sub get_repo_package {
+    my ($repo, $info) = @_;
+    unless (exists $idx->{$repo}) {
+	warning("Repository $repo doesn't exist");
+	return undef;
+    }
+    return $idx->{$repo}->get_by_key($info->{Package});
+}
+
 sub bin_checks {
     my ($info, $arch, $repo) = @_;
     my @checks = @{ $REPOS->{$repo}{'bin_checks'} || [] };
@@ -159,7 +213,7 @@ sub check_version_compare {
     my ($res, $info, $arch, $op, $repo, $tag) = @_;
     $op = version_normalize_relation($op);
     $tag = "BAD_VERSION_WRT_$repo/$arch" unless defined $tag;
-    my $item = $idx->{"$repo/$arch"}->get_by_key($info->{'Package'});
+    my $item = get_repo_package("$repo/$arch", $info);
     if (defined $item and
 	version_compare_relation($info->{Version}, $op, $item->{Version})) {
 	push @{$res->{'errors'}}, $tag;
@@ -170,7 +224,7 @@ sub check_version_compare_soft {
     my ($res, $info, $arch, $op, $repo, $tag) = @_;
     $op = version_normalize_relation($op);
     $tag = "SOFT_BAD_VERSION_WRT_$repo/$arch" unless defined $tag;
-    my $item = $idx->{"$repo/$arch"}->get_by_key($info->{'Package'});
+    my $item = get_repo_package("$repo/$arch", $info);
     if (defined $item and
 	version_compare_relation($info->{Version}, $op, $item->{Version})) {
 	push @{$res->{'warnings'}}, $tag;
@@ -179,7 +233,7 @@ sub check_version_compare_soft {
 
 sub check_must_be_in {
     my ($res, $info, $arch, $repo) = @_;
-    my $item = $idx->{"$repo/$arch"}->get_by_key($info->{'Package'});
+    my $item = get_repo_package("$repo/$arch", $info);
     unless (defined $item) {
 	push @{$res->{'errors'}}, "NOT_IN_$repo/$arch";
     }
@@ -187,7 +241,7 @@ sub check_must_be_in {
 
 sub check_must_not_be_in {
     my ($res, $info, $arch, $repo) = @_;
-    my $item = $idx->{"$repo/$arch"}->get_by_key($info->{'Package'});
+    my $item = get_repo_package("$repo/$arch", $info);
     if (defined $item) {
 	push @{$res->{'errors'}}, "ALSO_IN_$repo/$arch";
     }
@@ -203,7 +257,7 @@ sub check_has_source_in {
     } else {
 	$version = $info->{'Version'}
     }
-    my $item = $idx->{"$repo/src"}->get_by_key($src);
+    my $item = get_repo_package("$repo/src", { Package => $src });
     if (defined $item) {
 	unless ($item->{Version} eq $version) {
 	    push @{$res->{'errors'}},
