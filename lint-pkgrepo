@@ -101,7 +101,10 @@ foreach my $pkg ($global_src_index->get_keys()) {
     print "<tr><td>$pkg</td>\n";
     foreach my $repo (sort keys %$REPOS) {
 	my $cell = "<td";
-	my $info = $idx->{"$repo/src"}->get_by_key($pkg);
+	my $info;
+	if ($REPOS->{$repo}{'source'}) {
+	    $info = $idx->{"$repo/src"}->get_by_key($pkg);
+	}
 	if (defined $info) {
 	    my $res = src_checks($info, $repo);
 	    my $title = join(' ', @{$res->{'errors'}}, @{$res->{'warnings'}});
