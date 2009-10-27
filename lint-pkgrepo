@@ -1,0 +1,244 @@
+#!/usr/bin/perl
+
+use lib qw(/home/rhertzog/deb/core/dpkg/scripts);
+use lib qw(/home/buxy/perl);
+use strict;
+use warnings;
+
+use vars qw($REPOS);
+require $ARGV[0] or die "Can't parse config file $ARGV[1]!\n";
+
+use File::Fetch;
+use Dpkg::Index;
+use IO::Scalar;
+use File::Temp qw(tempdir);
+use Dpkg::Control;
+use Dpkg::ErrorHandling;
+use Dpkg::Version;
+
+my $CHECKS = {
+    "has_source_in" => \&check_has_source_in,
+    "has_binaries_in" => \&check_has_binaries_in,
+    "must_be_in" => \&check_must_be_in,
+    "must_not_be_in" => \&check_must_not_be_in,
+    "version_error" => \&check_version_compare,
+    "version_warn" => \&check_version_compare_soft,
+};
+my $TMP = tempdir(CLEANUP => 1);
+
+my $idx = {};
+my $global_src_index = Dpkg::Index->new(type => CTRL_INDEX_SRC);
+my $global_bin_index = Dpkg::Index->new(type => CTRL_INDEX_PKG);
+
+# Load all the indexes
+foreach my $repo (keys %$REPOS) {
+    my $base_uri = $REPOS->{$repo}{base_uri};
+    if ($REPOS->{$repo}{'source'}) {
+	my $index = parse_index_from_uri("$base_uri/source/Sources.gz",
+					 CTRL_INDEX_SRC);
+	$idx->{"$repo/src"} = $index;
+	$global_src_index->merge($index);
+    }
+    my @archs;
+    push @archs, @{$REPOS->{$repo}{'archs'}} if exists $REPOS->{$repo}{'archs'};
+    foreach my $arch (@archs) {
+	my $index = parse_index_from_uri("$base_uri/binary-$arch/Packages.gz",
+					 CTRL_INDEX_PKG);
+	$idx->{"$repo/$arch"} = $index;
+	$global_bin_index->merge($index);
+    }
+}
+
+$global_bin_index->sort();
+$global_src_index->sort();
+
+# Print the summary page
+print <<END;
+<html>
+<head>
+<title>Package repository analysis</title>
+</head>
+<body>
+<table border='1'>
+<tr><th>Binary package</th>
+END
+print "<th>$_</th>" foreach sort keys %$REPOS;
+print "</tr>\n";
+foreach my $pkg (sort $global_bin_index->get_keys()) {
+    print "<tr><td>$pkg</td>\n";
+    foreach my $repo (sort keys %$REPOS) {
+	my $cell = "<td";
+	my ($version, $arch) = same_version_on_all_arches($repo, $pkg);
+	if (not defined $version) {
+	    # Skip
+	    $cell .= ">&nbsp;"
+	} elsif ($version) {
+	    # Once for all arches
+	    my $info = $idx->{"$repo/$arch"}->get_by_key($pkg);
+	    my $res = bin_checks($info, $arch, $repo);
+	    my $title = join(' ', @{$res->{'errors'}}, @{$res->{'warnings'}});
+	    if (@{$res->{'errors'}}) {
+		$cell .= " title='$title' style='background-color: red'>"
+	    } elsif (@{$res->{'warnings'}}) {
+		$cell .= " title='$title' style='background-color: orange'>"
+	    } else {
+		$cell .= " style='background-color: green'>"
+	    }
+	    $cell .= $version;
+	} else {
+	    # Once for each arch
+	    # TODO:
+	    $cell .= ">TODO: Info differ between archs"
+	}
+	print "$cell</td>";
+    }
+    print "</tr>\n";
+}
+print "<tr><th>Source package</th>";
+print "<th>$_</th>" foreach sort keys %$REPOS;
+print "</tr>\n";
+foreach my $pkg ($global_src_index->get_keys()) {
+    print "<tr><td>$pkg</td>\n";
+    foreach my $repo (sort keys %$REPOS) {
+	my $cell = "<td";
+	my $info = $idx->{"$repo/src"}->get_by_key($pkg);
+	if (defined $info) {
+	    my $res = src_checks($info, $repo);
+	    my $title = join(' ', @{$res->{'errors'}}, @{$res->{'warnings'}});
+	    if (@{$res->{'errors'}}) {
+		$cell .= " title='$title' style='background-color: red'>"
+	    } elsif (@{$res->{'warnings'}}) {
+		$cell .= " title='$title' style='background-color: orange'>"
+	    } else {
+		$cell .= " style='background-color: green'>"
+	    }
+	    $cell .= $info->{'version'};
+	} else {
+	    $cell .= ">&nbsp;";
+	}
+	print "$cell</td>";
+    }
+    print "</tr>\n";
+}
+print "</table>\n</body>\n</html>";
+
+sub bin_checks {
+    my ($info, $arch, $repo) = @_;
+    my @checks = @{ $REPOS->{$repo}{'bin_checks'} || [] };
+    my $res = { errors => [], warnings => [] };
+    foreach my $check (@checks) {
+	my ($name, @params) = @$check;
+	if (exists $CHECKS->{$name}) {
+	    &{ $CHECKS->{$name} }($res, $info, $arch, @params);
+	} else {
+	    warning("unknown check %s", $name);
+	}
+    }
+    return $res;
+}
+
+sub src_checks {
+    my ($info, $repo) = @_;
+    my @checks = @{ $REPOS->{$repo}{'bin_checks'} || [] };
+    my $res = { errors => [], warnings => [] };
+    foreach my $check (@checks) {
+	my ($name, @params) = @$check;
+	if (exists $CHECKS->{$name}) {
+	    &{ $CHECKS->{$name} }($res, $info, "src", @params);
+	} else {
+	    warning("unknown check %s", $name);
+	}
+    }
+    return $res;
+}
+
+sub check_version_compare {
+    my ($res, $info, $arch, $op, $repo, $tag) = @_;
+    $op = version_normalize_relation($op);
+    $tag = "BAD_VERSION_WRT_$repo/$arch" unless defined $tag;
+    my $item = $idx->{"$repo/$arch"}->get_by_key($info->{'Package'});
+    if (defined $item and
+	version_compare_relation($info->{Version}, $op, $item->{Version})) {
+	push @{$res->{'errors'}}, $tag;
+    }
+}
+
+sub check_version_compare_soft {
+    my ($res, $info, $arch, $op, $repo, $tag) = @_;
+    $op = version_normalize_relation($op);
+    $tag = "SOFT_BAD_VERSION_WRT_$repo/$arch" unless defined $tag;
+    my $item = $idx->{"$repo/$arch"}->get_by_key($info->{'Package'});
+    if (defined $item and
+	version_compare_relation($info->{Version}, $op, $item->{Version})) {
+	push @{$res->{'warnings'}}, $tag;
+    }
+}
+
+sub check_must_be_in {
+    my ($res, $info, $arch, $repo) = @_;
+    my $item = $idx->{"$repo/$arch"}->get_by_key($info->{'Package'});
+    unless (defined $item) {
+	push @{$res->{'errors'}}, "NOT_IN_$repo/$arch";
+    }
+}
+
+sub check_must_not_be_in {
+    my ($res, $info, $arch, $repo) = @_;
+    my $item = $idx->{"$repo/$arch"}->get_by_key($info->{'Package'});
+    if (defined $item) {
+	push @{$res->{'errors'}}, "ALSO_IN_$repo/$arch";
+    }
+}
+
+sub check_has_source_in {
+    my ($res, $info, $arch, $repo) = @_;
+    my $src = $info->{'Source'} || $info->{'Package'} || "UNKNOWN";
+    my $version;
+    if ($src =~ /\((.*)\)/) {
+	$version = $1;
+	$src =~ s/\s.*$//;
+    } else {
+	$version = $info->{'Version'}
+    }
+    my $item = $idx->{"$repo/src"}->get_by_key($src);
+    if (defined $item) {
+	unless ($item->{Version} eq $version) {
+	    push @{$res->{'errors'}},
+		 "WRONG_SRC_VERSION_$repo/src_" . $item->{Version};
+	}
+    } else {
+	push @{$res->{'errors'}}, "NO_SOURCE_IN_$repo/src";
+    }
+}
+
+sub check_has_binaries_in {
+    my ($res, $info, $arch, $repo) = @_;
+    # TODO: 
+}
+
+sub same_version_on_all_arches {
+    my ($repo, $pkg) = @_;
+    my @archs = @{$REPOS->{$repo}{'archs'}};
+    my $first_arch = shift @archs;
+    my ($first_version, $version);
+    my $item = $idx->{"$repo/$first_arch"}->get_by_key($pkg);
+    $first_version = $item->{'Version'} if defined $item;
+    foreach my $arch (@archs) {
+	$item = $idx->{"$repo/$arch"}->get_by_key($pkg);
+	my $version = $item->{'Version'} if defined $item;
+	if ((defined($version) and defined($first_version) and
+	     $version ne $first_version) or (defined $version xor defined
+	     $first_version)) {
+	    return (0, undef);
+	}
+    }
+    return ($first_version, $first_arch);
+}
+
+sub parse_index_from_uri {
+    my ($uri, $type) = @_;
+    my $ff = File::Fetch->new(uri => $uri);
+    unlink("$TMP/" . $ff->output_file());
+    $ff->fetch(to => $TMP);
+    return Dpkg::Index->new(type => $type, load => "$TMP/" . $ff->output_file());
+}
