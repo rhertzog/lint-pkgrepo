@@ -1,5 +1,5 @@
 
-our @ARCHES = ('i386'); #, 'amd64');
+our @ARCHES = ('i386', 'amd64');
 $REPOS = {
     '4.1' => {
 	base_uri => 'http://ftp.slis.fr/slis/dists/4.1',

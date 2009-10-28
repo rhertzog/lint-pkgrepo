@@ -34,8 +34,7 @@ my $global_bin_index = Dpkg::Index->new(type => CTRL_INDEX_PKG);
 foreach my $repo (keys %$REPOS) {
     my $base_uri = get_repo_info('base_uri', $repo);
     my $components = get_repo_info('components', $repo);
-    my @archs;
-    push @archs, @{get_repo_info('archs', $repo, [])};
+    my @archs = @{get_repo_info('archs', $repo, [])};
     if (not defined $components) {
 	if (get_repo_info('source', $repo)) {
 	    my $index = parse_index_from_uri("$base_uri/source/Sources.gz",
@@ -92,30 +91,35 @@ print "</tr>\n";
 foreach my $pkg (sort $global_bin_index->get_keys()) {
     print "<tr><td>$pkg</td>\n";
     foreach my $repo (sort keys %$REPOS) {
-	my $cell = "<td";
+	my $cell;
+	my @archs = @{get_repo_info('archs', $repo, [])};
 	my ($version, $arch) = same_version_on_all_arches($repo, $pkg);
 	if (not defined $version) {
 	    # Skip
-	    $cell .= ">&nbsp;"
+	    $cell = "<td>&nbsp;</td>"
 	} elsif ($version) {
 	    # Once for all arches
-	    my $info = $idx->{"$repo/$arch"}->get_by_key($pkg);
+	    my $info = get_repo_package("$repo/$arch", { Package => $pkg });
 	    my $res = bin_checks($info, $arch, $repo);
-	    my $title = join(' ', @{$res->{'errors'}}, @{$res->{'warnings'}});
-	    if (@{$res->{'errors'}}) {
-		$cell .= " title='$title' style='background-color: red'>"
-	    } elsif (@{$res->{'warnings'}}) {
-		$cell .= " title='$title' style='background-color: orange'>"
-	    } else {
-		$cell .= " style='background-color: green'>"
-	    }
-	    $cell .= $version;
+	    $cell .= "<td " . res_to_html($res) . ">";
+	    $cell .= $version . "</td>";
 	} else {
 	    # Once for each arch
-	    # TODO:
-	    $cell .= ">TODO: Info differ between archs"
+	    $cell = "<td>";
+	    foreach $arch (@archs) {
+		my $info = get_repo_package("$repo/$arch", { Package => $pkg });
+		if (not defined $info) {
+		    $cell .= "<div style='background-color: grey'>" .
+			     "$arch: missing?</div>\n";
+		    next;
+		}
+		my $res = bin_checks($info, $arch, $repo);
+		$cell .= "<div " . res_to_html($res) . ">";
+		$cell .= $arch . ": " . $info->{Version} . "</div>\n";
+	    }
+	    $cell .= "</td>";
 	}
-	print "$cell</td>";
+	print $cell;
     }
     print "</tr>\n";
 }
@@ -125,30 +129,35 @@ print "</tr>\n";
 foreach my $pkg ($global_src_index->get_keys()) {
     print "<tr><td>$pkg</td>\n";
     foreach my $repo (sort keys %$REPOS) {
-	my $cell = "<td";
+	my $cell;
 	my $info;
-	if ($REPOS->{$repo}{'source'}) {
-	    $info = $idx->{"$repo/src"}->get_by_key($pkg);
+	if (get_repo_info('source', $repo)) {
+	    $info = get_repo_package("$repo/src", { Package => $pkg });
 	}
 	if (defined $info) {
 	    my $res = src_checks($info, $repo);
-	    my $title = join(' ', @{$res->{'errors'}}, @{$res->{'warnings'}});
-	    if (@{$res->{'errors'}}) {
-		$cell .= " title='$title' style='background-color: red'>"
-	    } elsif (@{$res->{'warnings'}}) {
-		$cell .= " title='$title' style='background-color: orange'>"
-	    } else {
-		$cell .= " style='background-color: green'>"
-	    }
-	    $cell .= $info->{'version'};
+	    $cell .= "<td " . res_to_html($res);
+	    $cell .= ">" . $info->{'version'} . "</td>";
 	} else {
-	    $cell .= ">&nbsp;";
+	    $cell .= "<td>&nbsp;</td>";
 	}
-	print "$cell</td>";
+	print $cell;
     }
     print "</tr>\n";
 }
 print "</table>\n</body>\n</html>";
+
+sub res_to_html {
+    my ($res) = @_;
+    my $title = join(' ', @{$res->{'errors'}}, @{$res->{'warnings'}});
+    if (@{$res->{'errors'}}) {
+	return "title='$title' style='background-color: red'"
+    } elsif (@{$res->{'warnings'}}) {
+	return "title='$title' style='background-color: orange'"
+    } else {
+	return "style='background-color: green'"
+    }
+}
 
 sub get_repo_info {
     my ($field, $repo, $default_value) = @_;
