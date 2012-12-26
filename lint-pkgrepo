@@ -305,6 +305,6 @@ sub parse_index_from_uri {
     my ($uri, $type) = @_;
     my $ff = File::Fetch->new(uri => $uri);
     unlink("$TMP/" . $ff->output_file());
-    $ff->fetch(to => $TMP);
+    $ff->fetch(to => $TMP) || die $ff->error;
     return Dpkg::Index->new(type => $type, load => "$TMP/" . $ff->output_file());
 }
